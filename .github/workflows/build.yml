@@ -61,10 +61,7 @@ jobs:
           cat > app/src/main/java/com/example/boltoverlay/Cfg.kt <<'EOF_FILE'
           package com.example.boltoverlay
 
-          import android.content.SharedPreferences
           import android.graphics.Color
-          import java.text.SimpleDateFormat
-          import java.util.Date
           import java.util.Locale
 
           object Cfg {
@@ -91,35 +88,6 @@ jobs:
               fun parse(t: String?): Double? = t?.replace(',', '.')?.trim()?.toDoubleOrNull()
 
               fun money(cur: String, v: Double): String = cur + String.format(Locale.US, "%.2f", v)
-
-              fun today(): String = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
-
-              /** Resets the daily totals when a new day starts. */
-              fun rollDay(p: SharedPreferences) {
-                  if (p.getString("day", "") != today()) {
-                      p.edit().putString("day", today()).putInt("dayTrips", 0)
-                          .putLong("dayDriverC", 0L).putLong("dayClientC", 0L).apply()
-                  }
-              }
-
-              fun resetToday(p: SharedPreferences) {
-                  p.edit().putString("day", today()).putInt("dayTrips", 0)
-                      .putLong("dayDriverC", 0L).putLong("dayClientC", 0L).apply()
-              }
-
-              /** Adds the current trip (client / uber / %) to today's totals. */
-              fun addTrip(p: SharedPreferences): Boolean {
-                  val client = parse(p.getString("client", "")) ?: return false
-                  val uber = parse(p.getString("uber", "")) ?: return false
-                  val pct = p.getInt("pct", 37)
-                  rollDay(p)
-                  val driver = uber * pct / 100.0
-                  p.edit().putInt("dayTrips", p.getInt("dayTrips", 0) + 1)
-                      .putLong("dayDriverC", p.getLong("dayDriverC", 0L) + Math.round(driver * 100))
-                      .putLong("dayClientC", p.getLong("dayClientC", 0L) + Math.round(client * 100))
-                      .apply()
-                  return true
-              }
           }
           EOF_FILE
           mkdir -p app/src/main/java/com/example/boltoverlay
@@ -153,14 +121,12 @@ jobs:
           class MainActivity : Activity() {
               private lateinit var prefs: SharedPreferences
               private lateinit var root: LinearLayout
-              private lateinit var client: EditText
-              private lateinit var uber: EditText
-              private lateinit var pct: EditText
+              private lateinit var price: EditText
               private lateinit var km: EditText
-              private lateinit var recentBox: LinearLayout
-              private lateinit var clientChips: LinearLayout
-              private lateinit var uberChips: LinearLayout
-              private lateinit var todayView: TextView
+              private lateinit var header: EditText
+              private lateinit var priceChips: LinearLayout
+              private lateinit var recentChips: LinearLayout
+              private lateinit var statusChips: LinearLayout
               private var pad = 0
 
               private fun send(action: String? = "kyoto.UPDATE") {
@@ -183,11 +149,10 @@ jobs:
                   root.addView(v)
               }
 
-              private fun input(hint: String, value: String, decimal: Boolean = true): EditText {
-                  val e = EditText(this)
-                  e.hint = hint; e.setText(value); e.setSingleLine()
-                  e.inputType = if (decimal) InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL else InputType.TYPE_CLASS_NUMBER
-                  return e
+              private fun label(t: String) {
+                  val v = TextView(this)
+                  v.text = t
+                  root.addView(v)
               }
 
               private fun checkRow(text: String, key: String, def: Boolean) {
@@ -228,34 +193,33 @@ jobs:
                   root.addView(tv); root.addView(sp)
               }
 
-              private fun chips(box: LinearLayout, csv: String, onTap: (String) -> Unit) {
+              private fun chipRow(box: LinearLayout) {
+                  box.orientation = LinearLayout.HORIZONTAL
+                  val h = HorizontalScrollView(this)
+                  h.addView(box)
+                  root.addView(h)
+              }
+
+              private fun fillChips(box: LinearLayout, csv: String, onTap: (String) -> Unit) {
                   box.removeAllViews()
                   csv.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach { v ->
                       box.addView(btn(v) { onTap(v) })
                   }
               }
 
-              private fun scrollRow(box: LinearLayout): HorizontalScrollView {
-                  box.orientation = LinearLayout.HORIZONTAL
-                  val h = HorizontalScrollView(this)
-                  h.addView(box)
-                  return h
-              }
-
               private fun showPill() {
-                  val c = Cfg.parse(client.text.toString())
-                  val u = Cfg.parse(uber.text.toString())
-                  val p = pct.text.toString().toIntOrNull()?.coerceIn(0, 100)
-                  if (c == null || u == null || p == null || c <= 0) {
-                      Toast.makeText(this, "Type client paid, Uber pays and your %", Toast.LENGTH_LONG).show()
+                  val p = Cfg.parse(price.text.toString())
+                  if (p == null || p <= 0) {
+                      Toast.makeText(this, "Type a price first", Toast.LENGTH_LONG).show()
                       return
                   }
-                  prefs.edit().putString("client", client.text.toString().trim())
-                      .putString("uber", uber.text.toString().trim())
+                  val hd = header.text.toString().trim().ifEmpty { "Active ride" }
+                  prefs.edit().putString("price", price.text.toString().trim())
                       .putString("km", km.text.toString().trim())
-                      .putInt("pct", p).putBoolean("shown", true).apply()
-                  saveRecent(client.text.toString().trim(), uber.text.toString().trim(), p)
-                  refreshRecent()
+                      .putString("header", hd)
+                      .putBoolean("shown", true).apply()
+                  saveRecent(price.text.toString().trim())
+                  fillChips(recentChips, prefs.getString("recent", "") ?: "") { setPriceAndShow(it) }
                   if (!Settings.canDrawOverlays(this)) {
                       Toast.makeText(this, "Allow 'Display over other apps' first", Toast.LENGTH_LONG).show()
                       startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
@@ -264,33 +228,14 @@ jobs:
                   send("kyoto.SHOW")
               }
 
-              private fun saveRecent(c: String, u: String, p: Int) {
-                  val entry = "$c|$u|$p"
-                  val list = (prefs.getString("recent", "") ?: "").split(";").filter { it.isNotBlank() && it != entry }
-                  prefs.edit().putString("recent", (listOf(entry) + list).take(6).joinToString(";")).apply()
+              private fun setPriceAndShow(v: String) {
+                  price.setText(v)
+                  showPill()
               }
 
-              private fun refreshRecent() {
-                  recentBox.removeAllViews()
-                  (prefs.getString("recent", "") ?: "").split(";").filter { it.isNotBlank() }.forEach { e ->
-                      val parts = e.split("|")
-                      if (parts.size == 3) {
-                          recentBox.addView(btn("${parts[0]} paid  →  Uber pays ${parts[1]}  (${parts[2]}%)") {
-                              client.setText(parts[0]); uber.setText(parts[1]); pct.setText(parts[2])
-                          })
-                      }
-                  }
-              }
-
-              private fun refreshToday() {
-                  Cfg.rollDay(prefs)
-                  val trips = prefs.getInt("dayTrips", 0)
-                  val total = prefs.getLong("dayDriverC", 0L) / 100.0
-                  val cur = Cfg.currencies[prefs.getInt("cur", 0).coerceIn(0, Cfg.currencies.size - 1)]
-                  val shift = prefs.getLong("shiftStart", 0L)
-                  val avg = if (trips > 0) "  ·  avg ${Cfg.money(cur, total / trips)}" else ""
-                  val sh = if (shift > 0L) "\nShift running since " + java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date(shift)) else ""
-                  todayView.text = "Today: $trips trips  ·  ${Cfg.money(cur, total)}$avg$sh"
+              private fun saveRecent(p: String) {
+                  val list = (prefs.getString("recent", "") ?: "").split(",").filter { it.isNotBlank() && it != p }
+                  prefs.edit().putString("recent", (listOf(p) + list).take(8).joinToString(",")).apply()
               }
 
               override fun onCreate(b: Bundle?) {
@@ -308,58 +253,67 @@ jobs:
                   val title = TextView(this)
                   title.text = "Kyoto"; title.textSize = 26f
                   root.addView(title)
-                  val info = TextView(this)
-                  info.text = "Type the real numbers of the trip. Blue outline = drag the pill anywhere. Tap it (without dragging) to come back here. Use the notification buttons (Show/Hide, + Trip, Lock) while driving."
-                  root.addView(info)
+                  label("Blue outline = drag the pill anywhere. Tap it (without dragging) to come back here. Use the notification buttons while driving.")
                   root.addView(btn("1. Allow display over other apps") {
                       startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
                   })
 
-                  // ---------- trip ----------
-                  heading("Trip")
-                  client = input("Client paid (e.g. 37)", prefs.getString("client", "") ?: "")
-                  uber = input("Uber pays (e.g. 18)", prefs.getString("uber", "") ?: "")
-                  pct = input("Your % of what Uber pays (e.g. 37)", prefs.getInt("pct", 37).toString(), false)
-                  km = input("Distance in km (optional)", prefs.getString("km", "") ?: "")
-                  root.addView(client); root.addView(uber); root.addView(pct); root.addView(km)
-
+                  // ---------- ride ----------
+                  heading("Ride")
+                  price = EditText(this)
+                  price.hint = "Price (e.g. 37)"; price.setSingleLine()
+                  price.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                  price.setText(prefs.getString("price", "") ?: "")
+                  km = EditText(this)
+                  km.hint = "Distance in km (optional)"; km.setSingleLine()
+                  km.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                  km.setText(prefs.getString("km", "") ?: "")
+                  header = EditText(this)
+                  header.hint = "Title on the pill"; header.setSingleLine()
+                  header.setText(prefs.getString("header", "Active ride") ?: "Active ride")
+                  root.addView(price); root.addView(km); root.addView(header)
                   root.addView(btn("2. Show pill") { showPill() })
                   root.addView(btn("Hide pill") { send(PillService.ACTION_HIDE) })
 
-                  // ---------- quick prices ----------
-                  heading("Quick prices")
-                  val tvC = TextView(this); tvC.text = "Client paid (tap to use)"
-                  root.addView(tvC)
-                  clientChips = LinearLayout(this)
-                  root.addView(scrollRow(clientChips))
-                  val tvU = TextView(this); tvU.text = "Uber pays (tap to use)"
-                  root.addView(tvU)
-                  uberChips = LinearLayout(this)
-                  root.addView(scrollRow(uberChips))
-                  val presetC = input("Your client prices, e.g. 10,15,20,37", prefs.getString("presetClient", "10,15,20,30,37") ?: "", false)
-                  presetC.inputType = InputType.TYPE_CLASS_TEXT
-                  val presetU = input("Your Uber prices, e.g. 5,8,10,18", prefs.getString("presetUber", "5,8,10,15,18") ?: "", false)
-                  presetU.inputType = InputType.TYPE_CLASS_TEXT
-                  root.addView(presetC); root.addView(presetU)
-                  fun rebuildChips() {
-                      chips(clientChips, prefs.getString("presetClient", "10,15,20,30,37") ?: "") { v ->
-                          client.setText(v); if (uber.text.isNotBlank()) showPill() else uber.requestFocus()
-                      }
-                      chips(uberChips, prefs.getString("presetUber", "5,8,10,15,18") ?: "") { v ->
-                          uber.setText(v); if (client.text.isNotBlank()) showPill() else client.requestFocus()
+                  // ---------- titles ----------
+                  heading("Quick titles")
+                  statusChips = LinearLayout(this)
+                  chipRow(statusChips)
+                  val statusEdit = EditText(this)
+                  statusEdit.hint = "Your titles, separated by commas"; statusEdit.setSingleLine()
+                  statusEdit.setText(prefs.getString("statuses", "Active ride,Pickup,Waiting,Drop-off") ?: "")
+                  root.addView(statusEdit)
+                  fun rebuildStatus() {
+                      fillChips(statusChips, prefs.getString("statuses", "Active ride,Pickup,Waiting,Drop-off") ?: "") { v ->
+                          header.setText(v)
+                          prefs.edit().putString("header", v).apply()
+                          send()
                       }
                   }
-                  rebuildChips()
-                  root.addView(btn("Save quick prices") {
-                      prefs.edit().putString("presetClient", presetC.text.toString()).putString("presetUber", presetU.text.toString()).apply()
-                      rebuildChips()
+                  rebuildStatus()
+                  root.addView(btn("Save titles") {
+                      prefs.edit().putString("statuses", statusEdit.text.toString()).apply(); rebuildStatus()
                   })
-                  val tvR = TextView(this); tvR.text = "Recent rides (tap to reuse)"
-                  root.addView(tvR)
-                  recentBox = LinearLayout(this)
-                  recentBox.orientation = LinearLayout.VERTICAL
-                  root.addView(recentBox)
-                  refreshRecent()
+
+                  // ---------- quick prices ----------
+                  heading("Quick prices (tap to show)")
+                  priceChips = LinearLayout(this)
+                  chipRow(priceChips)
+                  val presetEdit = EditText(this)
+                  presetEdit.hint = "Your prices, separated by commas"; presetEdit.setSingleLine()
+                  presetEdit.setText(prefs.getString("presets", "10,15,20,30,37") ?: "")
+                  root.addView(presetEdit)
+                  fun rebuildPrices() {
+                      fillChips(priceChips, prefs.getString("presets", "10,15,20,30,37") ?: "") { setPriceAndShow(it) }
+                  }
+                  rebuildPrices()
+                  root.addView(btn("Save quick prices") {
+                      prefs.edit().putString("presets", presetEdit.text.toString()).apply(); rebuildPrices()
+                  })
+                  label("Recent prices")
+                  recentChips = LinearLayout(this)
+                  chipRow(recentChips)
+                  fillChips(recentChips, prefs.getString("recent", "") ?: "") { setPriceAndShow(it) }
 
                   // ---------- style ----------
                   heading("Style")
@@ -371,35 +325,8 @@ jobs:
                   seek("Corner roundness", 0, 40, "radius", 22, "")
 
                   heading("What to show")
-                  checkRow("Split bar (colored)", "showBar", true)
-                  checkRow("Client paid", "showClient", true)
-                  checkRow("Uber kept", "showUber", true)
-                  checkRow("Owner kept", "showOwner", true)
+                  checkRow("Title (e.g. Active ride)", "showHeader", true)
                   checkRow("Price per km (needs distance)", "showKm", true)
-                  checkRow("Today total, average and per hour", "showToday", true)
-
-                  // ---------- today ----------
-                  heading("Today")
-                  todayView = TextView(this)
-                  root.addView(todayView)
-                  root.addView(btn("+ Add this trip to today") {
-                      if (Cfg.parse(client.text.toString()) == null || Cfg.parse(uber.text.toString()) == null) {
-                          Toast.makeText(this, "Type client paid and Uber pays first", Toast.LENGTH_LONG).show()
-                      } else {
-                          prefs.edit().putString("client", client.text.toString().trim())
-                              .putString("uber", uber.text.toString().trim())
-                              .putInt("pct", pct.text.toString().toIntOrNull()?.coerceIn(0, 100) ?: 37).apply()
-                          Cfg.addTrip(prefs); refreshToday(); send()
-                          Toast.makeText(this, "Trip added", Toast.LENGTH_SHORT).show()
-                      }
-                  })
-                  root.addView(btn("Start shift timer") {
-                      prefs.edit().putLong("shiftStart", System.currentTimeMillis()).apply(); refreshToday(); send()
-                  })
-                  root.addView(btn("Stop shift timer") {
-                      prefs.edit().putLong("shiftStart", 0L).apply(); refreshToday(); send()
-                  })
-                  root.addView(btn("Reset today") { Cfg.resetToday(prefs); refreshToday(); send() })
 
                   // ---------- position ----------
                   heading("Position")
@@ -414,12 +341,6 @@ jobs:
                   val sv = ScrollView(this)
                   sv.addView(root)
                   setContentView(sv)
-                  refreshToday()
-              }
-
-              override fun onResume() {
-                  super.onResume()
-                  if (::todayView.isInitialized) refreshToday()
               }
           }
           EOF_FILE
@@ -438,35 +359,20 @@ jobs:
           import android.graphics.PixelFormat
           import android.graphics.Typeface
           import android.graphics.drawable.GradientDrawable
-          import android.os.Handler
           import android.os.IBinder
-          import android.os.Looper
-          import android.text.SpannableString
-          import android.text.style.ForegroundColorSpan
           import android.view.Gravity
           import android.view.MotionEvent
-          import android.view.View
-          import android.view.ViewGroup
           import android.view.WindowManager
           import android.widget.LinearLayout
           import android.widget.TextView
           import android.widget.Toast
+          import java.util.Locale
           import kotlin.math.abs
-          import kotlin.math.max
 
           class PillService : Service() {
               private lateinit var wm: WindowManager
               private lateinit var prefs: SharedPreferences
-              private var pill: View? = null
-              private val h = Handler(Looper.getMainLooper())
-              private val tick = object : Runnable {
-                  override fun run() {
-                      if (prefs.getBoolean("shown", false) && prefs.getLong("shiftStart", 0L) > 0L) {
-                          render(); updateNotif()
-                      }
-                      h.postDelayed(this, 60000)
-                  }
-              }
+              private var pill: LinearLayout? = null
 
               override fun onBind(i: Intent?): IBinder? = null
 
@@ -477,7 +383,6 @@ jobs:
                   val nm = getSystemService(NotificationManager::class.java)
                   nm.createNotificationChannel(NotificationChannel("kyoto", "Kyoto", NotificationManager.IMPORTANCE_LOW))
                   startForeground(1, buildNotif())
-                  h.postDelayed(tick, 60000)
               }
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -485,15 +390,11 @@ jobs:
                       ACTION_HIDE -> prefs.edit().putBoolean("shown", false).apply()
                       ACTION_TOGGLE -> {
                           val now = prefs.getBoolean("shown", false)
-                          if (!now && (Cfg.parse(prefs.getString("client", "")) == null || Cfg.parse(prefs.getString("uber", "")) == null)) {
-                              Toast.makeText(this, "Open Kyoto and type the numbers first", Toast.LENGTH_LONG).show()
+                          if (!now && Cfg.parse(prefs.getString("price", "")) == null) {
+                              Toast.makeText(this, "Open Kyoto and type a price first", Toast.LENGTH_LONG).show()
                           } else {
                               prefs.edit().putBoolean("shown", !now).apply()
                           }
-                      }
-                      ACTION_ADD -> {
-                          if (Cfg.addTrip(prefs)) Toast.makeText(this, "Trip added to today", Toast.LENGTH_SHORT).show()
-                          else Toast.makeText(this, "Type client paid and Uber pays first", Toast.LENGTH_LONG).show()
                       }
                       ACTION_LOCKTOG -> prefs.edit().putBoolean("locked", !prefs.getBoolean("locked", false)).apply()
                       ACTION_RESET -> prefs.edit().remove("x").remove("y").apply()
@@ -516,20 +417,18 @@ jobs:
               }
 
               private fun buildNotif(): Notification {
-                  Cfg.rollDay(prefs)
                   val shown = prefs.getBoolean("shown", false)
                   val locked = prefs.getBoolean("locked", false)
                   val cur = Cfg.currencies[prefs.getInt("cur", 0).coerceIn(0, Cfg.currencies.size - 1)]
-                  val trips = prefs.getInt("dayTrips", 0)
-                  val total = prefs.getLong("dayDriverC", 0L) / 100.0
+                  val price = Cfg.parse(prefs.getString("price", ""))
+                  val text = if (shown && price != null) "Showing ${Cfg.money(cur, price)}" else "Pill hidden"
                   return Notification.Builder(this, "kyoto")
                       .setContentTitle("Kyoto")
-                      .setContentText("Today: $trips trips · ${Cfg.money(cur, total)}")
+                      .setContentText(text)
                       .setSmallIcon(android.R.drawable.ic_menu_info_details)
                       .setOngoing(true)
                       .addAction(act(ACTION_TOGGLE, if (shown) "Hide" else "Show", 1))
-                      .addAction(act(ACTION_ADD, "+ Trip", 2))
-                      .addAction(act(ACTION_LOCKTOG, if (locked) "Unlock" else "Lock", 3))
+                      .addAction(act(ACTION_LOCKTOG, if (locked) "Unlock" else "Lock", 2))
                       .build()
               }
 
@@ -544,10 +443,7 @@ jobs:
 
               private fun render() {
                   removePill()
-                  Cfg.rollDay(prefs)
-                  val client = Cfg.parse(prefs.getString("client", "")) ?: return
-                  val uber = Cfg.parse(prefs.getString("uber", "")) ?: return
-                  val pct = prefs.getInt("pct", 37)
+                  val price = Cfg.parse(prefs.getString("price", "")) ?: return
                   val cur = Cfg.currencies[prefs.getInt("cur", 0).coerceIn(0, Cfg.currencies.size - 1)]
                   val theme = Cfg.themes[prefs.getInt("theme", 0).coerceIn(0, Cfg.themes.size - 1)]
                   val accent = Color.parseColor(Cfg.accents[prefs.getInt("accent", 0).coerceIn(0, Cfg.accents.size - 1)].second)
@@ -556,17 +452,9 @@ jobs:
                   val opac = prefs.getInt("opacity", 95) / 100f
                   val radius = prefs.getInt("radius", 22)
                   val dm = resources.displayMetrics
-                  val red = Color.parseColor("#FF6B6B")
-                  val orange = Color.parseColor("#FFB84D")
 
                   fun d(v: Float): Int = (v * sc * dm.density).toInt()
                   fun sz(v: Float): Float = v * sc
-                  fun money(v: Double) = Cfg.money(cur, v)
-
-                  val uberKept = client - uber
-                  val driver = uber * pct / 100.0
-                  val owner = uber - driver
-                  fun share(v: Double): Int = if (client > 0) Math.round(v / client * 100).toInt() else 0
 
                   fun label(text: CharSequence, size: Float, color: Int, bold: Boolean = false): TextView {
                       val t = TextView(this)
@@ -575,92 +463,28 @@ jobs:
                       return t
                   }
 
-                  fun row(name: String, dot: Int?, value: String, valueColor: Int): LinearLayout {
-                      val r = LinearLayout(this)
-                      r.orientation = LinearLayout.HORIZONTAL
-                      r.setPadding(0, d(2f), 0, d(2f))
-                      val ls = SpannableString(if (dot != null) "● $name" else name)
-                      if (dot != null) ls.setSpan(ForegroundColorSpan(dot), 0, 1, 0)
-                      r.addView(label(ls, 13f, theme.muted), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                      r.addView(label(value, 13f, valueColor, true))
-                      return r
-                  }
-
                   val root = LinearLayout(this)
                   root.orientation = LinearLayout.VERTICAL
-                  root.setPadding(d(16f), d(12f), d(16f), d(12f))
-                  root.minimumWidth = d(240f)
+                  root.gravity = Gravity.CENTER_HORIZONTAL
+                  root.setPadding(d(22f), d(12f), d(22f), d(12f))
+                  root.minimumWidth = d(150f)
                   root.alpha = opac
                   val bg = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(theme.bg1, theme.bg2))
                   bg.cornerRadius = d(radius.toFloat()).toFloat()
                   if (!locked) bg.setStroke((2 * dm.density).toInt(), accent) else bg.setStroke(1, theme.stroke)
                   root.background = bg
 
-                  // header
-                  val header = label("TRIP BREAKDOWN", 10f, accent, true)
-                  header.letterSpacing = 0.12f
-                  root.addView(header)
-
-                  // big "You got" line
-                  val big = LinearLayout(this)
-                  big.orientation = LinearLayout.HORIZONTAL
-                  big.gravity = Gravity.CENTER_VERTICAL
-                  big.addView(label("You got  ", 13f, theme.muted))
-                  big.addView(label(money(driver), 28f, accent, true))
-                  big.addView(label("   ${share(driver)}% of fare", 11f, theme.muted))
-                  root.addView(big)
-
-                  // split bar
-                  if (prefs.getBoolean("showBar", true)) {
-                      val bar = LinearLayout(this)
-                      bar.orientation = LinearLayout.HORIZONTAL
-                      val track = GradientDrawable()
-                      track.setColor(Color.parseColor("#33888888")); track.cornerRadius = d(4f).toFloat()
-                      bar.background = track
-                      bar.clipToOutline = true
-                      val parts = listOf(share(uberKept) to red, share(owner) to orange, share(driver) to accent)
-                      for ((w, c) in parts) {
-                          if (w > 0) {
-                              val v = View(this)
-                              v.setBackgroundColor(c)
-                              bar.addView(v, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, max(1, w).toFloat()))
-                          }
-                      }
-                      val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, d(8f))
-                      lp.topMargin = d(6f); lp.bottomMargin = d(6f)
-                      root.addView(bar, lp)
+                  if (prefs.getBoolean("showHeader", true)) {
+                      val header = label((prefs.getString("header", "Active ride") ?: "").uppercase(Locale.getDefault()), 11f, accent, true)
+                      header.letterSpacing = 0.14f
+                      root.addView(header)
                   }
 
-                  if (prefs.getBoolean("showClient", true)) root.addView(row("Client paid", null, money(client), theme.text))
-                  if (prefs.getBoolean("showUber", true)) root.addView(row("Uber kept", red, "${money(uberKept)} (${share(uberKept)}%)", theme.text))
-                  if (prefs.getBoolean("showOwner", true)) root.addView(row("Owner kept", orange, "${money(owner)} (${share(owner)}%)", theme.text))
+                  root.addView(label(Cfg.money(cur, price), 34f, theme.text, true))
 
-                  // price per km
                   val km = Cfg.parse(prefs.getString("km", ""))
                   if (prefs.getBoolean("showKm", true) && km != null && km > 0) {
-                      root.addView(row("Per km (client · you)", null, "${money(client / km)} · ${money(driver / km)}", theme.text))
-                  }
-
-                  // today + per hour
-                  if (prefs.getBoolean("showToday", true)) {
-                      val trips = prefs.getInt("dayTrips", 0)
-                      val total = prefs.getLong("dayDriverC", 0L) / 100.0
-                      val shift = prefs.getLong("shiftStart", 0L)
-                      if (trips > 0 || shift > 0L) {
-                          val line = View(this)
-                          line.setBackgroundColor(theme.muted); line.alpha = 0.3f
-                          val llp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1)
-                          llp.topMargin = d(6f); llp.bottomMargin = d(4f)
-                          root.addView(line, llp)
-                          if (trips > 0) {
-                              root.addView(row("Today", null, "$trips trips · ${money(total)}", accent))
-                              root.addView(row("Average per trip", null, money(total / trips), theme.text))
-                          }
-                          if (shift > 0L) {
-                              val hours = (System.currentTimeMillis() - shift) / 3600000.0
-                              if (hours >= 0.05 && trips > 0) root.addView(row("Per hour", null, money(total / hours), accent))
-                          }
-                      }
+                      root.addView(label("${Cfg.money(cur, price / km)} per km", 12f, theme.muted))
                   }
 
                   var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
@@ -671,7 +495,7 @@ jobs:
                       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT
                   )
                   params.gravity = Gravity.TOP or Gravity.START
-                  params.x = prefs.getInt("x", dm.widthPixels / 2 - (125 * dm.density).toInt())
+                  params.x = prefs.getInt("x", dm.widthPixels / 2 - (80 * dm.density).toInt())
                   params.y = prefs.getInt("y", dm.heightPixels * 12 / 100)
 
                   if (!locked) {
@@ -711,7 +535,6 @@ jobs:
               }
 
               override fun onDestroy() {
-                  h.removeCallbacks(tick)
                   removePill()
                   super.onDestroy()
               }
@@ -720,7 +543,6 @@ jobs:
                   const val ACTION_HIDE = "kyoto.HIDE"
                   const val ACTION_RESET = "kyoto.RESET"
                   const val ACTION_TOGGLE = "kyoto.TOGGLE"
-                  const val ACTION_ADD = "kyoto.ADD"
                   const val ACTION_LOCKTOG = "kyoto.LOCKTOG"
                   const val ACTION_QUIT = "kyoto.QUIT"
               }
