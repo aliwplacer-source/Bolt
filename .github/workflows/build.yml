@@ -1,4 +1,4 @@
-name: Build Bolt Overlay APK
+name: Build Kyoto APK
 on:
   workflow_dispatch:
   push:
@@ -15,7 +15,7 @@ jobs:
           gradle-version: 8.7
       - name: Create project files
         run: |
-          mkdir -p BoltOverlay && cd BoltOverlay
+          mkdir -p Kyoto && cd Kyoto
           mkdir -p app
           cat > app/build.gradle.kts <<'EOF_FILE'
           plugins {
@@ -28,7 +28,7 @@ jobs:
               defaultConfig {
                   applicationId = "com.example.boltoverlay"
                   minSdk = 26
-                  targetSdk = 34
+                  targetSdk = 33
                   versionCode = 1
                   versionName = "1.0"
               }
@@ -44,428 +44,242 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-              <uses-permission android:name="android.permission.INTERNET" />
-              <application android:label="Bolt Overlay" android:theme="@android:style/Theme.Material.Light.DarkActionBar">
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <application android:label="Kyoto" android:theme="@android:style/Theme.Material.Light.DarkActionBar">
                   <activity android:name=".MainActivity" android:exported="true">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
-                  <service
-                      android:name=".BoltService"
-                      android:exported="true"
-                      android:label="Bolt Overlay"
-                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-                      <intent-filter>
-                          <action android:name="android.accessibilityservice.AccessibilityService" />
-                      </intent-filter>
-                      <meta-data android:name="android.accessibilityservice"
-                          android:resource="@xml/accessibility_config" />
-                  </service>
+                  <service android:name=".PillService" android:exported="false" />
               </application>
           </manifest>
-          EOF_FILE
-          mkdir -p app/src/main/java/com/example/boltoverlay
-          cat > app/src/main/java/com/example/boltoverlay/BoltService.kt <<'EOF_FILE'
-          package com.example.boltoverlay
-
-          import android.accessibilityservice.AccessibilityService
-          import android.view.accessibility.AccessibilityEvent
-          import android.view.accessibility.AccessibilityNodeInfo
-
-          class BoltService : AccessibilityService() {
-              private lateinit var overlay: OverlayCard
-              private var lastRun = 0L
-              private var lastKey = ""
-
-              override fun onServiceConnected() {
-                  overlay = OverlayCard(this)
-              }
-
-              override fun onAccessibilityEvent(e: AccessibilityEvent) {
-                  val pkg = e.packageName?.toString() ?: return
-                  if (pkg == packageName) return // ignore our own overlay
-                  if (pkg !in DRIVER_PKGS) {
-                      if (e.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && !pkg.contains("systemui")) {
-                          overlay.hide(); lastKey = ""
-                      }
-                      return
-                  }
-                  val now = System.currentTimeMillis()
-                  if (now - lastRun < 400) return
-                  lastRun = now
-
-                  val root = rootInActiveWindow ?: return
-                  val texts = ArrayList<String>()
-                  collect(root, texts)
-                  val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
-                  val debug = prefs.getBoolean("debug", false)
-
-                  val spanish = prefs.getString("lang", "en") == "es"
-                  val yPct = prefs.getInt("pillY", 12)
-
-                  val offer = OfferParser.parse(texts)
-                  if (offer == null) {
-                      if (debug && texts.isNotEmpty()) overlay.showDebug(texts) else overlay.hideCard()
-                      lastKey = ""
-                      // Earnings pill: if Bolt shows it, remember it. If it is hidden (eye icon), show our own pill.
-                      val earn = texts.map { it.trim() }.firstOrNull { PRICE_ONLY.matches(it) }
-                      if (earn != null) {
-                          prefs.edit().putString("lastEarn", earn).apply()
-                          overlay.hidePill()
-                      } else {
-                          val custom = prefs.getString("custom", "") ?: ""
-                          val v = custom.ifBlank { prefs.getString("lastEarn", "") ?: "" }
-                          if (v.isNotBlank()) overlay.showPill(v, yPct, spanish) else overlay.hidePill()
-                      }
-                      return
-                  }
-                  val key = "${offer.pickup}|${offer.dropoff}|${offer.price}"
-                  if (key == lastKey) return
-                  lastKey = key
-                  overlay.show(offer, prefs.getString("city", "") ?: "", prefs.getString("apikey", "") ?: "", debug, spanish)
-                  // Big price under the eye while an offer is on screen
-                  offer.price?.let { overlay.showPill(it.replace(" ", ""), yPct, spanish) }
-              }
-
-              private fun collect(n: AccessibilityNodeInfo?, out: MutableList<String>) {
-                  if (n == null) return
-                  n.text?.toString()?.takeIf { it.isNotBlank() }?.let { out.add(it) }
-                  n.contentDescription?.toString()?.takeIf { it.isNotBlank() && n.text == null }?.let { out.add(it) }
-                  for (i in 0 until n.childCount) collect(n.getChild(i), out)
-              }
-
-              override fun onInterrupt() { overlay.hide() }
-              override fun onDestroy() { overlay.hide(); super.onDestroy() }
-
-              companion object {
-                  val DRIVER_PKGS = setOf("com.ubercab.driver", "ee.mtakso.driver") // Uber Driver, Bolt Driver
-                  val PRICE_ONLY = Regex("""^([€$£]\s?\d+[.,]\d{1,2}|\d+[.,]\d{1,2}\s?(€|lei|ron|eur))$""", RegexOption.IGNORE_CASE)
-              }
-          }
           EOF_FILE
           mkdir -p app/src/main/java/com/example/boltoverlay
           cat > app/src/main/java/com/example/boltoverlay/MainActivity.kt <<'EOF_FILE'
           package com.example.boltoverlay
 
+          import android.Manifest
           import android.app.Activity
           import android.content.Intent
+          import android.content.pm.PackageManager
           import android.net.Uri
+          import android.os.Build
           import android.os.Bundle
           import android.provider.Settings
-          import android.text.InputType
           import android.widget.*
 
           class MainActivity : Activity() {
               override fun onCreate(b: Bundle?) {
                   super.onCreate(b)
-                  val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
-                  val es = prefs.getString("lang", "en") == "es"
-                  fun s(en: String, sp: String) = if (es) sp else en
+                  val prefs = getSharedPreferences("kyoto", MODE_PRIVATE)
+                  if (Build.VERSION.SDK_INT >= 33 &&
+                      checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+                  }
                   val pad = (16 * resources.displayMetrics.density).toInt()
                   val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad, pad, pad) }
 
+                  fun send(action: String?) {
+                      val i = Intent(this, PillService::class.java)
+                      if (action != null) i.action = action
+                      startForegroundService(i)
+                  }
                   fun btn(t: String, f: () -> Unit) = Button(this).apply { text = t; setOnClickListener { f() } }
-                  fun label(t: String) = TextView(this).apply { text = t; textSize = 16f; setPadding(0, pad / 2, 0, 0) }
 
-                  root.addView(label(s("Step 1: allow draw over other apps", "Paso 1: permitir mostrar sobre otras apps")))
-                  root.addView(btn(s("Overlay permission", "Permiso de superposición")) {
+                  root.addView(TextView(this).apply { text = "Kyoto"; textSize = 26f })
+                  root.addView(TextView(this).apply {
+                      text = "Type a price and tap Show. When the pill has a blue outline you can drag it anywhere. Tap it (without dragging) to come back here and edit."
+                      setPadding(0, pad / 2, 0, pad / 2)
+                  })
+
+                  root.addView(btn("1. Allow display over other apps") {
                       startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
                   })
-                  root.addView(label(s("Step 2: turn on 'Bolt Overlay' in Accessibility", "Paso 2: activar 'Bolt Overlay' en Accesibilidad")))
-                  root.addView(btn(s("Accessibility settings", "Ajustes de accesibilidad")) { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
 
-                  val lang = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
-                  val rEn = RadioButton(this).apply { text = "English"; id = 1001 }
-                  val rEs = RadioButton(this).apply { text = "Español"; id = 1002 }
-                  lang.addView(rEn); lang.addView(rEs); lang.check(if (es) 1002 else 1001)
-                  root.addView(label("Language / Idioma")); root.addView(lang)
+                  val price = EditText(this).apply {
+                      hint = "Price, e.g. €7.08"
+                      setText(prefs.getString("text", ""))
+                      setSingleLine()
+                  }
+                  root.addView(price)
 
-                  val city = EditText(this).apply {
-                      hint = s("City (e.g. Sitges, Spain) - helps find addresses", "Ciudad (ej. Sitges, España) - ayuda a encontrar direcciones")
-                      setText(prefs.getString("city", ""))
-                  }
-                  val custom = EditText(this).apply {
-                      hint = s("Custom price under the eye (e.g. €7.08). Empty = automatic", "Precio personalizado bajo el ojo (ej. €7.08). Vacío = automático")
-                      setText(prefs.getString("custom", ""))
-                  }
-                  val pillY = EditText(this).apply {
-                      hint = s("Pill height, % of screen (default 12)", "Altura de la píldora, % de pantalla (por defecto 12)")
-                      inputType = InputType.TYPE_CLASS_NUMBER
-                      setText(prefs.getInt("pillY", 12).toString())
-                  }
-                  val key = EditText(this).apply {
-                      hint = s("Google Maps API key (optional, for map picture)", "Clave API de Google Maps (opcional, para el mapa)")
-                      setText(prefs.getString("apikey", ""))
-                  }
-                  val debug = CheckBox(this).apply {
-                      text = s("Debug mode (show raw screen text)", "Modo debug (mostrar texto de pantalla)")
-                      isChecked = prefs.getBoolean("debug", false)
-                  }
-                  root.addView(city); root.addView(custom); root.addView(pillY); root.addView(key); root.addView(debug)
-                  root.addView(btn(s("Save", "Guardar")) {
-                      prefs.edit()
-                          .putString("city", city.text.toString())
-                          .putString("custom", custom.text.toString().trim())
-                          .putInt("pillY", pillY.text.toString().toIntOrNull()?.coerceIn(0, 90) ?: 12)
-                          .putString("apikey", key.text.toString())
-                          .putString("lang", if (lang.checkedRadioButtonId == 1002) "es" else "en")
-                          .putBoolean("debug", debug.isChecked).apply()
-                      Toast.makeText(this, s("Saved", "Guardado"), Toast.LENGTH_SHORT).show()
-                      recreate()
+                  root.addView(btn("2. Show pill") {
+                      val t = price.text.toString().trim()
+                      if (t.isEmpty()) { Toast.makeText(this, "Type a price first", Toast.LENGTH_SHORT).show(); return@btn }
+                      prefs.edit().putString("text", t).putBoolean("shown", true).apply()
+                      if (!Settings.canDrawOverlays(this)) {
+                          Toast.makeText(this, "Allow 'Display over other apps' first", Toast.LENGTH_LONG).show()
+                          startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                          return@btn
+                      }
+                      send("kyoto.SHOW")
                   })
+                  root.addView(btn("Hide pill") { send(PillService.ACTION_HIDE) })
+
+                  val lock = CheckBox(this).apply {
+                      text = "Lock position (touches go through to the app below)"
+                      isChecked = prefs.getBoolean("locked", false)
+                      setOnCheckedChangeListener { _, c ->
+                          prefs.edit().putBoolean("locked", c).apply()
+                          send("kyoto.UPDATE")
+                      }
+                  }
+                  root.addView(lock)
+                  root.addView(btn("Reset position") { send(PillService.ACTION_RESET) })
+
                   setContentView(ScrollView(this).apply { addView(root) })
               }
           }
           EOF_FILE
           mkdir -p app/src/main/java/com/example/boltoverlay
-          cat > app/src/main/java/com/example/boltoverlay/Offer.kt <<'EOF_FILE'
+          cat > app/src/main/java/com/example/boltoverlay/PillService.kt <<'EOF_FILE'
           package com.example.boltoverlay
 
-          data class Offer(
-              val pickup: String?,
-              val dropoff: String?,
-              val price: String?,
-              val distanceKm: Double?,
-              val etaMin: Int?,
-              val allTexts: List<String>
-          ) {
-              val pricePerKm: String?
-                  get() {
-                      val p = price?.replace(",", ".")?.filter { it.isDigit() || it == '.' }?.toDoubleOrNull()
-                      val d = distanceKm
-                      return if (p != null && d != null && d > 0) "%.2f / km".format(p / d) else null
-                  }
-          }
-
-          object OfferParser {
-              private val km = Regex("""(\d+[.,]?\d*)\s?km""", RegexOption.IGNORE_CASE)
-              private val min = Regex("""(\d+)\s?min""", RegexOption.IGNORE_CASE)
-              private val price = Regex("""[€$£]\s?\d+[.,]\d{1,2}|\d+[.,]\d{1,2}\s?(lei|ron|€|eur|zł|pln|kč|£|\$)""", RegexOption.IGNORE_CASE)
-              private val buttons = setOf("accept", "accepta", "acceptă", "aceptar", "decline", "refuz", "refuza", "rechazar", "skip", "reject")
-
-              /** Returns null if this screen does not look like a ride offer. */
-              fun parse(texts: List<String>): Offer? {
-                  val joined = texts.joinToString(" | ")
-                  val hasAccept = texts.any { t -> buttons.any { t.trim().lowercase().startsWith(it) } }
-                  val priceMatch = price.find(joined)
-                  // Must have a price AND (an accept button OR a distance). A lone price is just the earnings pill.
-                  if (priceMatch == null) return null
-                  if (!hasAccept && km.find(joined) == null) return null
-
-                  val addresses = texts.filter {
-                      val t = it.trim()
-                      t.length >= 6 && t.any(Char::isLetter) &&
-                          !price.containsMatchIn(t) &&
-                          !Regex("""^\d+[.,]?\d*\s?(km|min)""", RegexOption.IGNORE_CASE).containsMatchIn(t) &&
-                          t.lowercase() !in buttons
-                  }
-                  // Heuristic: the last two address-like lines are pickup, then drop-off.
-                  val pickup = if (addresses.size >= 2) addresses[addresses.size - 2] else null
-                  val dropoff = addresses.lastOrNull()
-
-                  return Offer(
-                      pickup = pickup,
-                      dropoff = dropoff,
-                      price = priceMatch?.value,
-                      distanceKm = km.findAll(joined).lastOrNull()?.groupValues?.get(1)?.replace(",", ".")?.toDoubleOrNull(),
-                      etaMin = min.find(joined)?.groupValues?.get(1)?.toIntOrNull(),
-                      allTexts = texts
-                  )
-              }
-          }
-          EOF_FILE
-          mkdir -p app/src/main/java/com/example/boltoverlay
-          cat > app/src/main/java/com/example/boltoverlay/OverlayCard.kt <<'EOF_FILE'
-          package com.example.boltoverlay
-
-          import android.content.Context
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
           import android.content.Intent
-          import android.graphics.BitmapFactory
           import android.graphics.Color
           import android.graphics.PixelFormat
           import android.graphics.Typeface
           import android.graphics.drawable.GradientDrawable
-          import android.location.Geocoder
-          import android.net.Uri
-          import android.os.Handler
-          import android.os.Looper
+          import android.os.IBinder
+          import android.text.SpannableString
+          import android.text.style.ForegroundColorSpan
           import android.view.Gravity
+          import android.view.MotionEvent
           import android.view.WindowManager
-          import android.widget.ImageView
-          import android.widget.LinearLayout
           import android.widget.TextView
-          import java.net.URL
-          import java.net.URLEncoder
-          import kotlin.concurrent.thread
+          import android.widget.Toast
+          import kotlin.math.abs
 
-          class OverlayCard(private val ctx: Context) {
-              private val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-              private val ui = Handler(Looper.getMainLooper())
-              private var view: LinearLayout? = null
+          class PillService : Service() {
+              private lateinit var wm: WindowManager
               private var pill: TextView? = null
-              private var pillText = ""
-              private var token = 0
-              private var es = false
-              private fun t(en: String, spanish: String) = if (es) spanish else en
+              private var lp: WindowManager.LayoutParams? = null
 
-              private fun dp(v: Int) = (v * ctx.resources.displayMetrics.density).toInt()
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-              private fun tv(text: String, size: Float, bold: Boolean = false, color: Int = Color.WHITE) =
-                  TextView(ctx).apply {
-                      this.text = text; textSize = size; setTextColor(color)
-                      if (bold) setTypeface(null, Typeface.BOLD)
+              override fun onBind(i: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(NotificationChannel("kyoto", "Kyoto", NotificationManager.IMPORTANCE_LOW))
+                  val n = Notification.Builder(this, "kyoto")
+                      .setContentTitle("Kyoto is running")
+                      .setSmallIcon(android.R.drawable.ic_menu_info_details)
+                      .build()
+                  startForeground(1, n)
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  val prefs = getSharedPreferences("kyoto", MODE_PRIVATE)
+                  when (intent?.action) {
+                      ACTION_HIDE -> {
+                          prefs.edit().putBoolean("shown", false).apply()
+                          removePill(); stopSelf(); return START_NOT_STICKY
+                      }
+                      ACTION_RESET -> prefs.edit().remove("x").remove("y").apply()
                   }
-
-              private fun container(): LinearLayout = LinearLayout(ctx).apply {
-                  orientation = LinearLayout.VERTICAL
-                  setPadding(dp(12), dp(10), dp(12), dp(10))
-                  background = GradientDrawable().apply {
-                      setColor(Color.parseColor("#EE1B1B1B")); cornerRadius = dp(14).toFloat()
+                  if (prefs.getBoolean("shown", false)) {
+                      render()
+                  } else {
+                      removePill(); stopSelf(); return START_NOT_STICKY
                   }
+                  return START_STICKY
               }
 
-              private fun place(v: LinearLayout) {
-                  hideCard()
-                  val lp = WindowManager.LayoutParams(
-                      dp(300), WindowManager.LayoutParams.WRAP_CONTENT,
-                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                      PixelFormat.TRANSLUCENT
-                  ).apply { gravity = Gravity.TOP or Gravity.START; x = dp(8); y = dp(90) }
-                  try { wm.addView(v, lp); view = v } catch (_: Exception) { /* overlay permission missing */ }
-              }
-
-              fun hideCard() {
-                  token++
-                  view?.let { try { wm.removeView(it) } catch (_: Exception) {} }
-                  view = null
-              }
-
-              fun hidePill() {
+              private fun removePill() {
                   pill?.let { try { wm.removeView(it) } catch (_: Exception) {} }
-                  pill = null; pillText = ""
+                  pill = null
               }
 
-              fun hide() { hideCard(); hidePill() }
+              private fun render() {
+                  removePill()
+                  val prefs = getSharedPreferences("kyoto", MODE_PRIVATE)
+                  val text = prefs.getString("text", "") ?: ""
+                  val locked = prefs.getBoolean("locked", false)
+                  val dm = resources.displayMetrics
 
-              /** Round dark pill under the eye icon, same look as Bolt's earnings pill. */
-              fun showPill(text: String, yPercent: Int, spanish: Boolean) {
-                  es = spanish
-                  if (pill != null && pillText == text) return
-                  hidePill()
-                  val sp = android.text.SpannableString(text)
-                  if (text.startsWith("€") || text.startsWith("$") || text.startsWith("£")) {
-                      sp.setSpan(android.text.style.ForegroundColorSpan(Color.parseColor("#22DD55")), 0, 1, 0)
+                  val sp = SpannableString(text)
+                  if (text.isNotEmpty() && text[0] in "€$£") {
+                      sp.setSpan(ForegroundColorSpan(Color.parseColor("#22DD55")), 0, 1, 0)
                   }
-                  val v = TextView(ctx).apply {
-                      this.text = sp; textSize = 24f; setTextColor(Color.WHITE); setTypeface(null, Typeface.BOLD)
+                  val tv = TextView(this).apply {
+                      this.text = sp
+                      textSize = 24f
+                      setTextColor(Color.WHITE)
+                      setTypeface(null, Typeface.BOLD)
                       setPadding(dp(22), dp(8), dp(22), dp(8))
-                      background = GradientDrawable().apply { setColor(Color.parseColor("#E6222222")); cornerRadius = dp(30).toFloat() }
-                      setOnClickListener {
-                          ctx.startActivity(Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                      background = GradientDrawable().apply {
+                          setColor(Color.parseColor("#E6222222"))
+                          cornerRadius = dp(30).toFloat()
+                          if (!locked) setStroke(dp(2), Color.parseColor("#4DA3FF")) // blue outline = you can drag it
                       }
                   }
-                  val h = ctx.resources.displayMetrics.heightPixels
-                  val lp = WindowManager.LayoutParams(
+
+                  var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                  if (locked) flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE // touches pass through
+
+                  val params = WindowManager.LayoutParams(
                       WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
-                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                      PixelFormat.TRANSLUCENT
-                  ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = h * yPercent / 100 }
-                  try { wm.addView(v, lp); pill = v; pillText = text } catch (_: Exception) {}
-              }
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT
+                  ).apply {
+                      gravity = Gravity.TOP or Gravity.START
+                      x = prefs.getInt("x", dm.widthPixels / 2 - dp(60))
+                      y = prefs.getInt("y", dm.heightPixels * 12 / 100)
+                  }
 
-              fun showDebug(texts: List<String>) {
-                  val c = container()
-                  c.addView(tv("DEBUG: texts on screen", 12f, true, Color.YELLOW))
-                  c.addView(tv(texts.take(25).joinToString("\n"), 11f))
-                  place(c)
-              }
-
-              fun show(offer: Offer, city: String, apiKey: String, debug: Boolean, spanish: Boolean) {
-                  es = spanish
-                  val c = container()
-                  c.addView(tv(t("Drop-off", "Destino"), 11f, color = Color.LTGRAY))
-                  c.addView(tv(offer.dropoff ?: t("Not found", "No encontrado"), 16f, true))
-                  val info = listOfNotNull(
-                      offer.price, offer.pricePerKm,
-                      offer.distanceKm?.let { "$it km" }, offer.etaMin?.let { "$it min" }
-                  ).joinToString("  •  ")
-                  if (info.isNotEmpty()) c.addView(tv(info, 13f, color = Color.parseColor("#7CFC9A")))
-                  val img = ImageView(ctx).apply { visibility = android.view.View.GONE }
-                  c.addView(img, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(150)).apply { topMargin = dp(6) })
-                  val open = tv(t("Open in Maps", "Abrir en Mapas"), 13f, true, Color.parseColor("#4DA3FF"))
-                  open.visibility = android.view.View.GONE
-                  c.addView(open)
-                  if (debug) c.addView(tv(offer.allTexts.take(15).joinToString(" / "), 9f, color = Color.GRAY))
-                  place(c)
-
-                  val my = token
-                  val q = offer.dropoff ?: return
-                  thread {
-                      try {
-                          val query = if (city.isNotBlank()) "$q, $city" else q
-                          val pt = geocode(query) ?: return@thread
-                          val lat = pt.first; val lon = pt.second
-                          ui.post {
-                              if (my != token) return@post
-                              open.visibility = android.view.View.VISIBLE
-                              open.setOnClickListener {
-                                  ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/maps/search/?api=1&query=$lat,$lon"))
-                                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                  if (!locked) {
+                      var startX = 0; var startY = 0
+                      var downX = 0f; var downY = 0f
+                      var moved = false
+                      tv.setOnTouchListener { v, e ->
+                          when (e.action) {
+                              MotionEvent.ACTION_DOWN -> {
+                                  startX = params.x; startY = params.y
+                                  downX = e.rawX; downY = e.rawY; moved = false
+                              }
+                              MotionEvent.ACTION_MOVE -> {
+                                  val ox = (e.rawX - downX).toInt(); val oy = (e.rawY - downY).toInt()
+                                  if (abs(ox) > dp(6) || abs(oy) > dp(6)) moved = true
+                                  params.x = startX + ox; params.y = startY + oy
+                                  try { wm.updateViewLayout(v, params) } catch (_: Exception) {}
+                              }
+                              MotionEvent.ACTION_UP -> {
+                                  if (moved) {
+                                      prefs.edit().putInt("x", params.x).putInt("y", params.y).apply()
+                                  } else {
+                                      startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                                  }
                               }
                           }
-                          if (apiKey.isNotBlank()) {
-                              val url = "https://maps.googleapis.com/maps/api/staticmap?size=600x300&zoom=14" +
-                                  "&markers=color:red%7C$lat,$lon&key=" + URLEncoder.encode(apiKey, "UTF-8")
-                              val bmp = BitmapFactory.decodeStream(URL(url).openStream())
-                              ui.post { if (my == token && bmp != null) { img.setImageBitmap(bmp); img.visibility = android.view.View.VISIBLE } }
-                          }
-                      } catch (_: Exception) {}
+                          true
+                      }
+                  }
+
+                  try {
+                      wm.addView(tv, params)
+                      pill = tv; lp = params
+                  } catch (_: Exception) {
+                      Toast.makeText(this, "Please allow 'Display over other apps' for Kyoto", Toast.LENGTH_LONG).show()
+                      stopSelf()
                   }
               }
 
-              /** Phone geocoder first; if it fails (e.g. phones without Google services), use OpenStreetMap. */
-              private fun geocode(query: String): Pair<Double, Double>? {
-                  try {
-                      @Suppress("DEPRECATION")
-                      val r = Geocoder(ctx).getFromLocationName(query, 1)?.firstOrNull()
-                      if (r != null) return Pair(r.latitude, r.longitude)
-                  } catch (_: Exception) {}
-                  try {
-                      val url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" + URLEncoder.encode(query, "UTF-8")
-                      val conn = URL(url).openConnection() as java.net.HttpURLConnection
-                      conn.setRequestProperty("User-Agent", "DriverOverlay/1.0")
-                      conn.connectTimeout = 8000; conn.readTimeout = 8000
-                      val body = conn.inputStream.bufferedReader().readText()
-                      val arr = org.json.JSONArray(body)
-                      if (arr.length() > 0) {
-                          val o = arr.getJSONObject(0)
-                          return Pair(o.getString("lat").toDouble(), o.getString("lon").toDouble())
-                      }
-                  } catch (_: Exception) {}
-                  return null
+              override fun onDestroy() { removePill(); super.onDestroy() }
+
+              companion object {
+                  const val ACTION_HIDE = "kyoto.HIDE"
+                  const val ACTION_RESET = "kyoto.RESET"
               }
           }
-          EOF_FILE
-          mkdir -p app/src/main/res/values
-          cat > app/src/main/res/values/strings.xml <<'EOF_FILE'
-          <resources>
-              <string name="service_desc">Reads the Bolt Driver ride offer on screen and shows the drop-off point.</string>
-          </resources>
-          EOF_FILE
-          mkdir -p app/src/main/res/xml
-          cat > app/src/main/res/xml/accessibility_config.xml <<'EOF_FILE'
-          <?xml version="1.0" encoding="utf-8"?>
-          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-              android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged"
-              android:accessibilityFeedbackType="feedbackGeneric"
-              android:accessibilityFlags="flagRetrieveInteractiveWindows|flagIncludeNotImportantViews"
-              android:canRetrieveWindowContent="true"
-              android:notificationTimeout="300"
-              android:description="@string/service_desc" />
           EOF_FILE
           cat > build.gradle.kts <<'EOF_FILE'
           plugins {
@@ -476,13 +290,13 @@ jobs:
           cat > settings.gradle.kts <<'EOF_FILE'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
           dependencyResolutionManagement { repositories { google(); mavenCentral() } }
-          rootProject.name = "BoltOverlay"
+          rootProject.name = "Kyoto"
           include(":app")
           EOF_FILE
       - name: Build
-        working-directory: BoltOverlay
+        working-directory: Kyoto
         run: gradle assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
-          name: BoltOverlay-apk
-          path: BoltOverlay/app/build/outputs/apk/debug/app-debug.apk
+          name: Kyoto-apk
+          path: Kyoto/app/build/outputs/apk/debug/app-debug.apk
