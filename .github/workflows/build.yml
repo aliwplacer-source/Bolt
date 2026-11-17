@@ -58,79 +58,368 @@ jobs:
           </manifest>
           EOF_FILE
           mkdir -p app/src/main/java/com/example/boltoverlay
+          cat > app/src/main/java/com/example/boltoverlay/Cfg.kt <<'EOF_FILE'
+          package com.example.boltoverlay
+
+          import android.content.SharedPreferences
+          import android.graphics.Color
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          object Cfg {
+              const val FILE = "kyoto"
+
+              class Theme(val name: String, val bg1: Int, val bg2: Int, val text: Int, val muted: Int, val stroke: Int)
+
+              val themes = listOf(
+                  Theme("Midnight", Color.parseColor("#FF15151A"), Color.parseColor("#FF2A2A35"), Color.parseColor("#FFFFFFFF"), Color.parseColor("#FFA0A0B0"), Color.parseColor("#33FFFFFF")),
+                  Theme("Glass", Color.parseColor("#B3000000"), Color.parseColor("#B3181822"), Color.parseColor("#FFFFFFFF"), Color.parseColor("#FFC0C0C8"), Color.parseColor("#55FFFFFF")),
+                  Theme("Light", Color.parseColor("#FFFFFFFF"), Color.parseColor("#FFECECF2"), Color.parseColor("#FF111111"), Color.parseColor("#FF666672"), Color.parseColor("#22000000")),
+                  Theme("Sunset", Color.parseColor("#FF3A1C71"), Color.parseColor("#FFD76D77"), Color.parseColor("#FFFFFFFF"), Color.parseColor("#FFE8D5F0"), Color.parseColor("#44FFFFFF")),
+                  Theme("Ocean", Color.parseColor("#FF0F2027"), Color.parseColor("#FF2C5364"), Color.parseColor("#FFFFFFFF"), Color.parseColor("#FFB8D4E0"), Color.parseColor("#44FFFFFF")),
+                  Theme("Black", Color.parseColor("#FF000000"), Color.parseColor("#FF000000"), Color.parseColor("#FFFFFFFF"), Color.parseColor("#FF9A9A9A"), Color.parseColor("#44FFFFFF"))
+              )
+
+              val accents = listOf(
+                  "Green" to "#22DD55", "Blue" to "#4DA3FF", "Gold" to "#FFC857",
+                  "Pink" to "#FF5FA2", "Purple" to "#B388FF", "White" to "#FFFFFF"
+              )
+
+              val currencies = listOf("€", "$", "£", "")
+
+              fun parse(t: String?): Double? = t?.replace(',', '.')?.trim()?.toDoubleOrNull()
+
+              fun money(cur: String, v: Double): String = cur + String.format(Locale.US, "%.2f", v)
+
+              fun today(): String = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+
+              /** Resets the daily totals when a new day starts. */
+              fun rollDay(p: SharedPreferences) {
+                  if (p.getString("day", "") != today()) {
+                      p.edit().putString("day", today()).putInt("dayTrips", 0)
+                          .putLong("dayDriverC", 0L).putLong("dayClientC", 0L).apply()
+                  }
+              }
+
+              fun resetToday(p: SharedPreferences) {
+                  p.edit().putString("day", today()).putInt("dayTrips", 0)
+                      .putLong("dayDriverC", 0L).putLong("dayClientC", 0L).apply()
+              }
+
+              /** Adds the current trip (client / uber / %) to today's totals. */
+              fun addTrip(p: SharedPreferences): Boolean {
+                  val client = parse(p.getString("client", "")) ?: return false
+                  val uber = parse(p.getString("uber", "")) ?: return false
+                  val pct = p.getInt("pct", 37)
+                  rollDay(p)
+                  val driver = uber * pct / 100.0
+                  p.edit().putInt("dayTrips", p.getInt("dayTrips", 0) + 1)
+                      .putLong("dayDriverC", p.getLong("dayDriverC", 0L) + Math.round(driver * 100))
+                      .putLong("dayClientC", p.getLong("dayClientC", 0L) + Math.round(client * 100))
+                      .apply()
+                  return true
+              }
+          }
+          EOF_FILE
+          mkdir -p app/src/main/java/com/example/boltoverlay
           cat > app/src/main/java/com/example/boltoverlay/MainActivity.kt <<'EOF_FILE'
           package com.example.boltoverlay
 
           import android.Manifest
           import android.app.Activity
           import android.content.Intent
+          import android.content.SharedPreferences
           import android.content.pm.PackageManager
           import android.net.Uri
           import android.os.Build
           import android.os.Bundle
           import android.provider.Settings
-          import android.widget.*
+          import android.text.InputType
+          import android.view.View
+          import android.widget.AdapterView
+          import android.widget.ArrayAdapter
+          import android.widget.Button
+          import android.widget.CheckBox
+          import android.widget.EditText
+          import android.widget.HorizontalScrollView
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.SeekBar
+          import android.widget.Spinner
+          import android.widget.TextView
+          import android.widget.Toast
 
           class MainActivity : Activity() {
+              private lateinit var prefs: SharedPreferences
+              private lateinit var root: LinearLayout
+              private lateinit var client: EditText
+              private lateinit var uber: EditText
+              private lateinit var pct: EditText
+              private lateinit var km: EditText
+              private lateinit var recentBox: LinearLayout
+              private lateinit var clientChips: LinearLayout
+              private lateinit var uberChips: LinearLayout
+              private lateinit var todayView: TextView
+              private var pad = 0
+
+              private fun send(action: String? = "kyoto.UPDATE") {
+                  val i = Intent(this, PillService::class.java)
+                  if (action != null) i.action = action
+                  startForegroundService(i)
+              }
+
+              private fun btn(t: String, f: () -> Unit): Button {
+                  val b = Button(this)
+                  b.text = t; b.isAllCaps = false
+                  b.setOnClickListener { f() }
+                  return b
+              }
+
+              private fun heading(t: String) {
+                  val v = TextView(this)
+                  v.text = t; v.textSize = 18f
+                  v.setPadding(0, pad * 3 / 2, 0, pad / 4)
+                  root.addView(v)
+              }
+
+              private fun input(hint: String, value: String, decimal: Boolean = true): EditText {
+                  val e = EditText(this)
+                  e.hint = hint; e.setText(value); e.setSingleLine()
+                  e.inputType = if (decimal) InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL else InputType.TYPE_CLASS_NUMBER
+                  return e
+              }
+
+              private fun checkRow(text: String, key: String, def: Boolean) {
+                  val c = CheckBox(this)
+                  c.text = text; c.isChecked = prefs.getBoolean(key, def)
+                  c.setOnCheckedChangeListener { _, v -> prefs.edit().putBoolean(key, v).apply(); send() }
+                  root.addView(c)
+              }
+
+              private fun seek(label: String, lo: Int, hi: Int, key: String, def: Int, unit: String) {
+                  val tv = TextView(this)
+                  val sb = SeekBar(this)
+                  sb.max = hi - lo
+                  sb.progress = prefs.getInt(key, def) - lo
+                  tv.text = "$label: ${prefs.getInt(key, def)}$unit"
+                  sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) { tv.text = "$label: ${p + lo}$unit" }
+                      override fun onStartTrackingTouch(s: SeekBar?) {}
+                      override fun onStopTrackingTouch(s: SeekBar?) {
+                          prefs.edit().putInt(key, (s?.progress ?: 0) + lo).apply(); send()
+                      }
+                  })
+                  root.addView(tv); root.addView(sb)
+              }
+
+              private fun choice(label: String, options: List<String>, key: String, def: Int) {
+                  val tv = TextView(this)
+                  tv.text = label
+                  val sp = Spinner(this)
+                  sp.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, options)
+                  sp.setSelection(prefs.getInt(key, def))
+                  sp.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                      override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                          if (pos != prefs.getInt(key, def)) { prefs.edit().putInt(key, pos).apply(); send() }
+                      }
+                      override fun onNothingSelected(p: AdapterView<*>?) {}
+                  }
+                  root.addView(tv); root.addView(sp)
+              }
+
+              private fun chips(box: LinearLayout, csv: String, onTap: (String) -> Unit) {
+                  box.removeAllViews()
+                  csv.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach { v ->
+                      box.addView(btn(v) { onTap(v) })
+                  }
+              }
+
+              private fun scrollRow(box: LinearLayout): HorizontalScrollView {
+                  box.orientation = LinearLayout.HORIZONTAL
+                  val h = HorizontalScrollView(this)
+                  h.addView(box)
+                  return h
+              }
+
+              private fun showPill() {
+                  val c = Cfg.parse(client.text.toString())
+                  val u = Cfg.parse(uber.text.toString())
+                  val p = pct.text.toString().toIntOrNull()?.coerceIn(0, 100)
+                  if (c == null || u == null || p == null || c <= 0) {
+                      Toast.makeText(this, "Type client paid, Uber pays and your %", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  prefs.edit().putString("client", client.text.toString().trim())
+                      .putString("uber", uber.text.toString().trim())
+                      .putString("km", km.text.toString().trim())
+                      .putInt("pct", p).putBoolean("shown", true).apply()
+                  saveRecent(client.text.toString().trim(), uber.text.toString().trim(), p)
+                  refreshRecent()
+                  if (!Settings.canDrawOverlays(this)) {
+                      Toast.makeText(this, "Allow 'Display over other apps' first", Toast.LENGTH_LONG).show()
+                      startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                      return
+                  }
+                  send("kyoto.SHOW")
+              }
+
+              private fun saveRecent(c: String, u: String, p: Int) {
+                  val entry = "$c|$u|$p"
+                  val list = (prefs.getString("recent", "") ?: "").split(";").filter { it.isNotBlank() && it != entry }
+                  prefs.edit().putString("recent", (listOf(entry) + list).take(6).joinToString(";")).apply()
+              }
+
+              private fun refreshRecent() {
+                  recentBox.removeAllViews()
+                  (prefs.getString("recent", "") ?: "").split(";").filter { it.isNotBlank() }.forEach { e ->
+                      val parts = e.split("|")
+                      if (parts.size == 3) {
+                          recentBox.addView(btn("${parts[0]} paid  →  Uber pays ${parts[1]}  (${parts[2]}%)") {
+                              client.setText(parts[0]); uber.setText(parts[1]); pct.setText(parts[2])
+                          })
+                      }
+                  }
+              }
+
+              private fun refreshToday() {
+                  Cfg.rollDay(prefs)
+                  val trips = prefs.getInt("dayTrips", 0)
+                  val total = prefs.getLong("dayDriverC", 0L) / 100.0
+                  val cur = Cfg.currencies[prefs.getInt("cur", 0).coerceIn(0, Cfg.currencies.size - 1)]
+                  val shift = prefs.getLong("shiftStart", 0L)
+                  val avg = if (trips > 0) "  ·  avg ${Cfg.money(cur, total / trips)}" else ""
+                  val sh = if (shift > 0L) "\nShift running since " + java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date(shift)) else ""
+                  todayView.text = "Today: $trips trips  ·  ${Cfg.money(cur, total)}$avg$sh"
+              }
+
               override fun onCreate(b: Bundle?) {
                   super.onCreate(b)
-                  val prefs = getSharedPreferences("kyoto", MODE_PRIVATE)
+                  prefs = getSharedPreferences(Cfg.FILE, MODE_PRIVATE)
                   if (Build.VERSION.SDK_INT >= 33 &&
                       checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                       requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
                   }
-                  val pad = (16 * resources.displayMetrics.density).toInt()
-                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad, pad, pad) }
+                  pad = (16 * resources.displayMetrics.density).toInt()
+                  root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setPadding(pad, pad, pad, pad)
 
-                  fun send(action: String?) {
-                      val i = Intent(this, PillService::class.java)
-                      if (action != null) i.action = action
-                      startForegroundService(i)
-                  }
-                  fun btn(t: String, f: () -> Unit) = Button(this).apply { text = t; setOnClickListener { f() } }
-
-                  root.addView(TextView(this).apply { text = "Kyoto"; textSize = 26f })
-                  root.addView(TextView(this).apply {
-                      text = "Type a price and tap Show. When the pill has a blue outline you can drag it anywhere. Tap it (without dragging) to come back here and edit."
-                      setPadding(0, pad / 2, 0, pad / 2)
-                  })
-
+                  val title = TextView(this)
+                  title.text = "Kyoto"; title.textSize = 26f
+                  root.addView(title)
+                  val info = TextView(this)
+                  info.text = "Type the real numbers of the trip. Blue outline = drag the pill anywhere. Tap it (without dragging) to come back here. Use the notification buttons (Show/Hide, + Trip, Lock) while driving."
+                  root.addView(info)
                   root.addView(btn("1. Allow display over other apps") {
                       startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
                   })
 
-                  val price = EditText(this).apply {
-                      hint = "Price, e.g. €7.08"
-                      setText(prefs.getString("text", ""))
-                      setSingleLine()
-                  }
-                  root.addView(price)
+                  // ---------- trip ----------
+                  heading("Trip")
+                  client = input("Client paid (e.g. 37)", prefs.getString("client", "") ?: "")
+                  uber = input("Uber pays (e.g. 18)", prefs.getString("uber", "") ?: "")
+                  pct = input("Your % of what Uber pays (e.g. 37)", prefs.getInt("pct", 37).toString(), false)
+                  km = input("Distance in km (optional)", prefs.getString("km", "") ?: "")
+                  root.addView(client); root.addView(uber); root.addView(pct); root.addView(km)
 
-                  root.addView(btn("2. Show pill") {
-                      val t = price.text.toString().trim()
-                      if (t.isEmpty()) { Toast.makeText(this, "Type a price first", Toast.LENGTH_SHORT).show(); return@btn }
-                      prefs.edit().putString("text", t).putBoolean("shown", true).apply()
-                      if (!Settings.canDrawOverlays(this)) {
-                          Toast.makeText(this, "Allow 'Display over other apps' first", Toast.LENGTH_LONG).show()
-                          startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
-                          return@btn
-                      }
-                      send("kyoto.SHOW")
-                  })
+                  root.addView(btn("2. Show pill") { showPill() })
                   root.addView(btn("Hide pill") { send(PillService.ACTION_HIDE) })
 
-                  val lock = CheckBox(this).apply {
-                      text = "Lock position (touches go through to the app below)"
-                      isChecked = prefs.getBoolean("locked", false)
-                      setOnCheckedChangeListener { _, c ->
-                          prefs.edit().putBoolean("locked", c).apply()
-                          send("kyoto.UPDATE")
+                  // ---------- quick prices ----------
+                  heading("Quick prices")
+                  val tvC = TextView(this); tvC.text = "Client paid (tap to use)"
+                  root.addView(tvC)
+                  clientChips = LinearLayout(this)
+                  root.addView(scrollRow(clientChips))
+                  val tvU = TextView(this); tvU.text = "Uber pays (tap to use)"
+                  root.addView(tvU)
+                  uberChips = LinearLayout(this)
+                  root.addView(scrollRow(uberChips))
+                  val presetC = input("Your client prices, e.g. 10,15,20,37", prefs.getString("presetClient", "10,15,20,30,37") ?: "", false)
+                  presetC.inputType = InputType.TYPE_CLASS_TEXT
+                  val presetU = input("Your Uber prices, e.g. 5,8,10,18", prefs.getString("presetUber", "5,8,10,15,18") ?: "", false)
+                  presetU.inputType = InputType.TYPE_CLASS_TEXT
+                  root.addView(presetC); root.addView(presetU)
+                  fun rebuildChips() {
+                      chips(clientChips, prefs.getString("presetClient", "10,15,20,30,37") ?: "") { v ->
+                          client.setText(v); if (uber.text.isNotBlank()) showPill() else uber.requestFocus()
+                      }
+                      chips(uberChips, prefs.getString("presetUber", "5,8,10,15,18") ?: "") { v ->
+                          uber.setText(v); if (client.text.isNotBlank()) showPill() else client.requestFocus()
                       }
                   }
+                  rebuildChips()
+                  root.addView(btn("Save quick prices") {
+                      prefs.edit().putString("presetClient", presetC.text.toString()).putString("presetUber", presetU.text.toString()).apply()
+                      rebuildChips()
+                  })
+                  val tvR = TextView(this); tvR.text = "Recent rides (tap to reuse)"
+                  root.addView(tvR)
+                  recentBox = LinearLayout(this)
+                  recentBox.orientation = LinearLayout.VERTICAL
+                  root.addView(recentBox)
+                  refreshRecent()
+
+                  // ---------- style ----------
+                  heading("Style")
+                  choice("Theme", Cfg.themes.map { it.name }, "theme", 0)
+                  choice("Accent color", Cfg.accents.map { it.first }, "accent", 0)
+                  choice("Currency", listOf("€  Euro", "$  Dollar", "£  Pound", "None"), "cur", 0)
+                  seek("Size", 70, 170, "size", 100, "%")
+                  seek("Opacity", 40, 100, "opacity", 95, "%")
+                  seek("Corner roundness", 0, 40, "radius", 22, "")
+
+                  heading("What to show")
+                  checkRow("Split bar (colored)", "showBar", true)
+                  checkRow("Client paid", "showClient", true)
+                  checkRow("Uber kept", "showUber", true)
+                  checkRow("Owner kept", "showOwner", true)
+                  checkRow("Price per km (needs distance)", "showKm", true)
+                  checkRow("Today total, average and per hour", "showToday", true)
+
+                  // ---------- today ----------
+                  heading("Today")
+                  todayView = TextView(this)
+                  root.addView(todayView)
+                  root.addView(btn("+ Add this trip to today") {
+                      if (Cfg.parse(client.text.toString()) == null || Cfg.parse(uber.text.toString()) == null) {
+                          Toast.makeText(this, "Type client paid and Uber pays first", Toast.LENGTH_LONG).show()
+                      } else {
+                          prefs.edit().putString("client", client.text.toString().trim())
+                              .putString("uber", uber.text.toString().trim())
+                              .putInt("pct", pct.text.toString().toIntOrNull()?.coerceIn(0, 100) ?: 37).apply()
+                          Cfg.addTrip(prefs); refreshToday(); send()
+                          Toast.makeText(this, "Trip added", Toast.LENGTH_SHORT).show()
+                      }
+                  })
+                  root.addView(btn("Start shift timer") {
+                      prefs.edit().putLong("shiftStart", System.currentTimeMillis()).apply(); refreshToday(); send()
+                  })
+                  root.addView(btn("Stop shift timer") {
+                      prefs.edit().putLong("shiftStart", 0L).apply(); refreshToday(); send()
+                  })
+                  root.addView(btn("Reset today") { Cfg.resetToday(prefs); refreshToday(); send() })
+
+                  // ---------- position ----------
+                  heading("Position")
+                  val lock = CheckBox(this)
+                  lock.text = "Lock position (touches go through to the app below)"
+                  lock.isChecked = prefs.getBoolean("locked", false)
+                  lock.setOnCheckedChangeListener { _, c -> prefs.edit().putBoolean("locked", c).apply(); send() }
                   root.addView(lock)
                   root.addView(btn("Reset position") { send(PillService.ACTION_RESET) })
+                  root.addView(btn("Stop Kyoto completely") { send(PillService.ACTION_QUIT) })
 
-                  setContentView(ScrollView(this).apply { addView(root) })
+                  val sv = ScrollView(this)
+                  sv.addView(root)
+                  setContentView(sv)
+                  refreshToday()
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  if (::todayView.isInitialized) refreshToday()
               }
           }
           EOF_FILE
@@ -141,58 +430,111 @@ jobs:
           import android.app.Notification
           import android.app.NotificationChannel
           import android.app.NotificationManager
+          import android.app.PendingIntent
           import android.app.Service
           import android.content.Intent
+          import android.content.SharedPreferences
           import android.graphics.Color
           import android.graphics.PixelFormat
           import android.graphics.Typeface
           import android.graphics.drawable.GradientDrawable
+          import android.os.Handler
           import android.os.IBinder
+          import android.os.Looper
           import android.text.SpannableString
           import android.text.style.ForegroundColorSpan
           import android.view.Gravity
           import android.view.MotionEvent
+          import android.view.View
+          import android.view.ViewGroup
           import android.view.WindowManager
+          import android.widget.LinearLayout
           import android.widget.TextView
           import android.widget.Toast
           import kotlin.math.abs
+          import kotlin.math.max
 
           class PillService : Service() {
               private lateinit var wm: WindowManager
-              private var pill: TextView? = null
-              private var lp: WindowManager.LayoutParams? = null
-
-              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private lateinit var prefs: SharedPreferences
+              private var pill: View? = null
+              private val h = Handler(Looper.getMainLooper())
+              private val tick = object : Runnable {
+                  override fun run() {
+                      if (prefs.getBoolean("shown", false) && prefs.getLong("shiftStart", 0L) > 0L) {
+                          render(); updateNotif()
+                      }
+                      h.postDelayed(this, 60000)
+                  }
+              }
 
               override fun onBind(i: Intent?): IBinder? = null
 
               override fun onCreate() {
                   super.onCreate()
+                  prefs = getSharedPreferences(Cfg.FILE, MODE_PRIVATE)
                   wm = getSystemService(WINDOW_SERVICE) as WindowManager
                   val nm = getSystemService(NotificationManager::class.java)
                   nm.createNotificationChannel(NotificationChannel("kyoto", "Kyoto", NotificationManager.IMPORTANCE_LOW))
-                  val n = Notification.Builder(this, "kyoto")
-                      .setContentTitle("Kyoto is running")
-                      .setSmallIcon(android.R.drawable.ic_menu_info_details)
-                      .build()
-                  startForeground(1, n)
+                  startForeground(1, buildNotif())
+                  h.postDelayed(tick, 60000)
               }
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-                  val prefs = getSharedPreferences("kyoto", MODE_PRIVATE)
                   when (intent?.action) {
-                      ACTION_HIDE -> {
+                      ACTION_HIDE -> prefs.edit().putBoolean("shown", false).apply()
+                      ACTION_TOGGLE -> {
+                          val now = prefs.getBoolean("shown", false)
+                          if (!now && (Cfg.parse(prefs.getString("client", "")) == null || Cfg.parse(prefs.getString("uber", "")) == null)) {
+                              Toast.makeText(this, "Open Kyoto and type the numbers first", Toast.LENGTH_LONG).show()
+                          } else {
+                              prefs.edit().putBoolean("shown", !now).apply()
+                          }
+                      }
+                      ACTION_ADD -> {
+                          if (Cfg.addTrip(prefs)) Toast.makeText(this, "Trip added to today", Toast.LENGTH_SHORT).show()
+                          else Toast.makeText(this, "Type client paid and Uber pays first", Toast.LENGTH_LONG).show()
+                      }
+                      ACTION_LOCKTOG -> prefs.edit().putBoolean("locked", !prefs.getBoolean("locked", false)).apply()
+                      ACTION_RESET -> prefs.edit().remove("x").remove("y").apply()
+                      ACTION_QUIT -> {
                           prefs.edit().putBoolean("shown", false).apply()
                           removePill(); stopSelf(); return START_NOT_STICKY
                       }
-                      ACTION_RESET -> prefs.edit().remove("x").remove("y").apply()
                   }
-                  if (prefs.getBoolean("shown", false)) {
-                      render()
-                  } else {
-                      removePill(); stopSelf(); return START_NOT_STICKY
-                  }
+                  if (prefs.getBoolean("shown", false)) render() else removePill()
+                  updateNotif()
                   return START_STICKY
+              }
+
+              private fun act(action: String, title: String, code: Int): Notification.Action {
+                  val pi = PendingIntent.getService(
+                      this, code, Intent(this, PillService::class.java).setAction(action),
+                      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                  )
+                  return Notification.Action.Builder(0, title, pi).build()
+              }
+
+              private fun buildNotif(): Notification {
+                  Cfg.rollDay(prefs)
+                  val shown = prefs.getBoolean("shown", false)
+                  val locked = prefs.getBoolean("locked", false)
+                  val cur = Cfg.currencies[prefs.getInt("cur", 0).coerceIn(0, Cfg.currencies.size - 1)]
+                  val trips = prefs.getInt("dayTrips", 0)
+                  val total = prefs.getLong("dayDriverC", 0L) / 100.0
+                  return Notification.Builder(this, "kyoto")
+                      .setContentTitle("Kyoto")
+                      .setContentText("Today: $trips trips · ${Cfg.money(cur, total)}")
+                      .setSmallIcon(android.R.drawable.ic_menu_info_details)
+                      .setOngoing(true)
+                      .addAction(act(ACTION_TOGGLE, if (shown) "Hide" else "Show", 1))
+                      .addAction(act(ACTION_ADD, "+ Trip", 2))
+                      .addAction(act(ACTION_LOCKTOG, if (locked) "Unlock" else "Lock", 3))
+                      .build()
+              }
+
+              private fun updateNotif() {
+                  getSystemService(NotificationManager::class.java).notify(1, buildNotif())
               }
 
               private fun removePill() {
@@ -202,25 +544,122 @@ jobs:
 
               private fun render() {
                   removePill()
-                  val prefs = getSharedPreferences("kyoto", MODE_PRIVATE)
-                  val text = prefs.getString("text", "") ?: ""
+                  Cfg.rollDay(prefs)
+                  val client = Cfg.parse(prefs.getString("client", "")) ?: return
+                  val uber = Cfg.parse(prefs.getString("uber", "")) ?: return
+                  val pct = prefs.getInt("pct", 37)
+                  val cur = Cfg.currencies[prefs.getInt("cur", 0).coerceIn(0, Cfg.currencies.size - 1)]
+                  val theme = Cfg.themes[prefs.getInt("theme", 0).coerceIn(0, Cfg.themes.size - 1)]
+                  val accent = Color.parseColor(Cfg.accents[prefs.getInt("accent", 0).coerceIn(0, Cfg.accents.size - 1)].second)
                   val locked = prefs.getBoolean("locked", false)
+                  val sc = prefs.getInt("size", 100) / 100f
+                  val opac = prefs.getInt("opacity", 95) / 100f
+                  val radius = prefs.getInt("radius", 22)
                   val dm = resources.displayMetrics
+                  val red = Color.parseColor("#FF6B6B")
+                  val orange = Color.parseColor("#FFB84D")
 
-                  val sp = SpannableString(text)
-                  if (text.isNotEmpty() && text[0] in "€$£") {
-                      sp.setSpan(ForegroundColorSpan(Color.parseColor("#22DD55")), 0, 1, 0)
+                  fun d(v: Float): Int = (v * sc * dm.density).toInt()
+                  fun sz(v: Float): Float = v * sc
+                  fun money(v: Double) = Cfg.money(cur, v)
+
+                  val uberKept = client - uber
+                  val driver = uber * pct / 100.0
+                  val owner = uber - driver
+                  fun share(v: Double): Int = if (client > 0) Math.round(v / client * 100).toInt() else 0
+
+                  fun label(text: CharSequence, size: Float, color: Int, bold: Boolean = false): TextView {
+                      val t = TextView(this)
+                      t.text = text; t.textSize = sz(size); t.setTextColor(color)
+                      if (bold) t.setTypeface(null, Typeface.BOLD)
+                      return t
                   }
-                  val tv = TextView(this).apply {
-                      this.text = sp
-                      textSize = 24f
-                      setTextColor(Color.WHITE)
-                      setTypeface(null, Typeface.BOLD)
-                      setPadding(dp(22), dp(8), dp(22), dp(8))
-                      background = GradientDrawable().apply {
-                          setColor(Color.parseColor("#E6222222"))
-                          cornerRadius = dp(30).toFloat()
-                          if (!locked) setStroke(dp(2), Color.parseColor("#4DA3FF")) // blue outline = you can drag it
+
+                  fun row(name: String, dot: Int?, value: String, valueColor: Int): LinearLayout {
+                      val r = LinearLayout(this)
+                      r.orientation = LinearLayout.HORIZONTAL
+                      r.setPadding(0, d(2f), 0, d(2f))
+                      val ls = SpannableString(if (dot != null) "● $name" else name)
+                      if (dot != null) ls.setSpan(ForegroundColorSpan(dot), 0, 1, 0)
+                      r.addView(label(ls, 13f, theme.muted), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                      r.addView(label(value, 13f, valueColor, true))
+                      return r
+                  }
+
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setPadding(d(16f), d(12f), d(16f), d(12f))
+                  root.minimumWidth = d(240f)
+                  root.alpha = opac
+                  val bg = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(theme.bg1, theme.bg2))
+                  bg.cornerRadius = d(radius.toFloat()).toFloat()
+                  if (!locked) bg.setStroke((2 * dm.density).toInt(), accent) else bg.setStroke(1, theme.stroke)
+                  root.background = bg
+
+                  // header
+                  val header = label("TRIP BREAKDOWN", 10f, accent, true)
+                  header.letterSpacing = 0.12f
+                  root.addView(header)
+
+                  // big "You got" line
+                  val big = LinearLayout(this)
+                  big.orientation = LinearLayout.HORIZONTAL
+                  big.gravity = Gravity.CENTER_VERTICAL
+                  big.addView(label("You got  ", 13f, theme.muted))
+                  big.addView(label(money(driver), 28f, accent, true))
+                  big.addView(label("   ${share(driver)}% of fare", 11f, theme.muted))
+                  root.addView(big)
+
+                  // split bar
+                  if (prefs.getBoolean("showBar", true)) {
+                      val bar = LinearLayout(this)
+                      bar.orientation = LinearLayout.HORIZONTAL
+                      val track = GradientDrawable()
+                      track.setColor(Color.parseColor("#33888888")); track.cornerRadius = d(4f).toFloat()
+                      bar.background = track
+                      bar.clipToOutline = true
+                      val parts = listOf(share(uberKept) to red, share(owner) to orange, share(driver) to accent)
+                      for ((w, c) in parts) {
+                          if (w > 0) {
+                              val v = View(this)
+                              v.setBackgroundColor(c)
+                              bar.addView(v, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, max(1, w).toFloat()))
+                          }
+                      }
+                      val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, d(8f))
+                      lp.topMargin = d(6f); lp.bottomMargin = d(6f)
+                      root.addView(bar, lp)
+                  }
+
+                  if (prefs.getBoolean("showClient", true)) root.addView(row("Client paid", null, money(client), theme.text))
+                  if (prefs.getBoolean("showUber", true)) root.addView(row("Uber kept", red, "${money(uberKept)} (${share(uberKept)}%)", theme.text))
+                  if (prefs.getBoolean("showOwner", true)) root.addView(row("Owner kept", orange, "${money(owner)} (${share(owner)}%)", theme.text))
+
+                  // price per km
+                  val km = Cfg.parse(prefs.getString("km", ""))
+                  if (prefs.getBoolean("showKm", true) && km != null && km > 0) {
+                      root.addView(row("Per km (client · you)", null, "${money(client / km)} · ${money(driver / km)}", theme.text))
+                  }
+
+                  // today + per hour
+                  if (prefs.getBoolean("showToday", true)) {
+                      val trips = prefs.getInt("dayTrips", 0)
+                      val total = prefs.getLong("dayDriverC", 0L) / 100.0
+                      val shift = prefs.getLong("shiftStart", 0L)
+                      if (trips > 0 || shift > 0L) {
+                          val line = View(this)
+                          line.setBackgroundColor(theme.muted); line.alpha = 0.3f
+                          val llp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1)
+                          llp.topMargin = d(6f); llp.bottomMargin = d(4f)
+                          root.addView(line, llp)
+                          if (trips > 0) {
+                              root.addView(row("Today", null, "$trips trips · ${money(total)}", accent))
+                              root.addView(row("Average per trip", null, money(total / trips), theme.text))
+                          }
+                          if (shift > 0L) {
+                              val hours = (System.currentTimeMillis() - shift) / 3600000.0
+                              if (hours >= 0.05 && trips > 0) root.addView(row("Per hour", null, money(total / hours), accent))
+                          }
                       }
                   }
 
@@ -230,17 +669,16 @@ jobs:
                   val params = WindowManager.LayoutParams(
                       WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
                       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT
-                  ).apply {
-                      gravity = Gravity.TOP or Gravity.START
-                      x = prefs.getInt("x", dm.widthPixels / 2 - dp(60))
-                      y = prefs.getInt("y", dm.heightPixels * 12 / 100)
-                  }
+                  )
+                  params.gravity = Gravity.TOP or Gravity.START
+                  params.x = prefs.getInt("x", dm.widthPixels / 2 - (125 * dm.density).toInt())
+                  params.y = prefs.getInt("y", dm.heightPixels * 12 / 100)
 
                   if (!locked) {
                       var startX = 0; var startY = 0
                       var downX = 0f; var downY = 0f
                       var moved = false
-                      tv.setOnTouchListener { v, e ->
+                      root.setOnTouchListener { v, e ->
                           when (e.action) {
                               MotionEvent.ACTION_DOWN -> {
                                   startX = params.x; startY = params.y
@@ -248,7 +686,7 @@ jobs:
                               }
                               MotionEvent.ACTION_MOVE -> {
                                   val ox = (e.rawX - downX).toInt(); val oy = (e.rawY - downY).toInt()
-                                  if (abs(ox) > dp(6) || abs(oy) > dp(6)) moved = true
+                                  if (abs(ox) > 12 || abs(oy) > 12) moved = true
                                   params.x = startX + ox; params.y = startY + oy
                                   try { wm.updateViewLayout(v, params) } catch (_: Exception) {}
                               }
@@ -265,19 +703,26 @@ jobs:
                   }
 
                   try {
-                      wm.addView(tv, params)
-                      pill = tv; lp = params
+                      wm.addView(root, params)
+                      pill = root
                   } catch (_: Exception) {
                       Toast.makeText(this, "Please allow 'Display over other apps' for Kyoto", Toast.LENGTH_LONG).show()
-                      stopSelf()
                   }
               }
 
-              override fun onDestroy() { removePill(); super.onDestroy() }
+              override fun onDestroy() {
+                  h.removeCallbacks(tick)
+                  removePill()
+                  super.onDestroy()
+              }
 
               companion object {
                   const val ACTION_HIDE = "kyoto.HIDE"
                   const val ACTION_RESET = "kyoto.RESET"
+                  const val ACTION_TOGGLE = "kyoto.TOGGLE"
+                  const val ACTION_ADD = "kyoto.ADD"
+                  const val ACTION_LOCKTOG = "kyoto.LOCKTOG"
+                  const val ACTION_QUIT = "kyoto.QUIT"
               }
           }
           EOF_FILE
